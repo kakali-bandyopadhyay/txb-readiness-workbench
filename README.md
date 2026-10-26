@@ -20,10 +20,10 @@ docker compose up --build
 
 Open `http://localhost:8080`. Check `http://localhost:8080/actuator/health` for `{"status":"UP"}`. PostgreSQL runs Flyway migrations and receives synthetic seed records automatically. Kafka runs in single-node KRaft mode. To recreate the sample database from scratch, stop the app and run `docker compose down -v`, then `docker compose up --build`.
 
-Run the test suite with Java 25:
+Run the test suite with Maven 3.9.11+ and Java 25:
 
-```sh
-./mvnw verify
+```powershell
+mvn verify
 ```
 
 Integration tests use Testcontainers and need a running Docker engine. GitHub Actions uses a Maven/Java container to run the same verification.
