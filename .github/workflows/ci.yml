@@ -1,0 +1,13 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    container: maven:3.9.11-eclipse-temurin-25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run tests
+        run: mvn --batch-mode --no-transfer-progress verify
