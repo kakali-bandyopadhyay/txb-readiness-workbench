@@ -2,6 +2,11 @@
 
 A small Java web application that makes readiness for a synthetic transaction banking feature launch visible. It is a **personal prototype showing recent Java work on a current stack; not production banking software and not evidence of bank-scale operations.** All names, dates, figures, evidence references and records are synthetic; decision rules are illustrative.
 
+**Walkthrough** (built from screenshots · synthetic data · 68 s)
+
+https://github.com/user-attachments/assets/f1028d69-7f37-4e55-b6eb-8f69fb9c8f69
+
+
 ## Start here
 
 Open `http://localhost:8080`, sign in with a demo account below, then select **Real-time payments for corporate virtual accounts (synthetic)**. The release workspace shows impacted teams, actions, readiness percentage, blockers, and links to UAT, controls, decision, dashboard, and stabilisation pages. Open `/api/docs` for the OpenAPI UI.
