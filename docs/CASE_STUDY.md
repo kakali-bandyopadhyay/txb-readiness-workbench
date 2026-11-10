@@ -44,7 +44,8 @@ The dashboard shows the mandatory-action fraction, open critical and high defect
 - The small monolith avoids distributed deployment and keeps the demo workflow inspectable.
 - In-memory users and demo passwords are for local use only; there is no production identity system.
 - Seed values and rules are illustrative and require review before any real operational use.
-- The prototype has no client integration, payment processing, event streaming, AI-generated summary, real evidence repository or deployment pipeline.
+- Kafka event streaming (payment-status events to a stabilisation queue) is a single-node demo, off by default; the executive summary is a draft that a readiness lead must approve before it appears.
+- There is no client integration, payment processing, real evidence repository or deployment pipeline.
 - Team readiness maps action owners to impacted teams with an illustrative count; it is not a risk score.
 
 ## Screenshots
