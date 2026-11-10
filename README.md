@@ -4,7 +4,8 @@ A small Java web application that makes readiness for a synthetic transaction ba
 
 **Walkthrough** (built from screenshots · synthetic data · 68 s)
 
-https://github.com/user-attachments/assets/f1028d69-7f37-4e55-b6eb-8f69fb9c8f69
+
+https://github.com/user-attachments/assets/e3a21af3-ead8-42d7-8492-eb7487b9d9c6
 
 
 ## Start here
