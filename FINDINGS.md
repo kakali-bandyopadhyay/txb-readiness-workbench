@@ -226,6 +226,36 @@ Environment: as in A0–A1 (i7-1165G7 4C/8T, 16 GB, Temurin 25.0.4.1), plus Post
 
 Authorship: the session-backed authentication change, the session integration test and the load driver (including per-worker cookies and the `--sessions` flag) were hand-coded by Kakali Bandyopadhyay. AI assistance (Claude): the BCrypt hypothesis, the choice of JFR views, review comments, and formatting of this section.
 
+## Concurrency & performance (Nov 2026) — A2: platform and virtual request threads
+
+Question: once the BCrypt hotspot is gone (A3), does running Tomcat request handling on virtual threads (`spring.threads.virtual.enabled=true`) raise throughput?
+
+Setup: the fixed session-backed app, PostgreSQL 17.6 via Docker Compose, HikariCP pool 10, Kafka listener off, and the closed-loop HTTP load driver in `loadtest/LoadDriver.java` (driver always on virtual threads; only the server setting changes). Each worker keeps its own HTTP client and session; the request mix is 80% `GET /api/releases/1/dashboard` and 20% `PATCH /api/actions/{id}` rotated across release 1's actions, with a fixed random seed. One unrecorded warm-up run after each app restart; then three runs per cell, each a 30-second warm-up window followed by 60 measured seconds. The setup is diagrammed in `docs/diagrams/loadtest-setup.md`.
+
+| Workers | Request threads | Throughput median (range), req/s | p50 median (range), ms | p95 median (range), ms | p99 median (range), ms | Errors / 409s | Max Hikari pending (range) |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 50 | Platform | 383.4 (349.4–412.4) | 112.5 (105.7–120.7) | 293.4 (263.7–326.4) | 440.9 (440.1–519.0) | 0 / 0 | 40 (40–40) |
+| 50 | Virtual | 357.0 (280.7–435.7) | 124.8 (107.3–145.3) | 298.3 (234.7–428.2) | 427.9 (309.1–626.0) | 0 / 0 | 40 (40–40) |
+| 200 | Platform | 511.5 (419.4–514.7) | 349.6 (347.7–412.5) | 887.8 (879.3–1,146.6) | 1,159.0 (1,151.2–1,605.9) | 0 / 0 | 190 (189–190) |
+| 200 | Virtual | 419.9 (347.9–443.9) | 428.2 (420.8–483.5) | 1,059.4 (970.3–1,430.5) | 1,452.4 (1,233.2–2,092.8) | 0 / 0 | 190 (190–190) |
+
+Order check: all platform runs were made before all virtual runs. One further platform-thread run at 200 workers, after the virtual runs, a fresh restart and a warm-up (`vt-off-c200-order-check`): 265.7 req/s, p50 524.2 ms, p95 2,159.9 ms, p99 3,946.8 ms, 1 error, max pending 189. That is below every virtual 200-worker run (347.9–443.9 req/s) and about half the earlier platform median (511.5 req/s). It is a single run.
+
+Result:
+- Virtual threads gave no throughput gain at either concurrency. At 50 workers the medians differ by 7% and the ranges overlap.
+- At 200 workers the earlier platform-vs-virtual gap (511.5 vs 419.9 req/s) did not reproduce: the later platform run was slower than any virtual run. Throughput drifted downwards across the session whatever the thread type, so no thread-type difference is claimed at 200 workers.
+- Both modes were bound by the 10-connection Hikari pool: max pending 40 at 50 workers and 189–190 at 200 workers (200 workers minus 10 active connections). Virtual threads remove the limit on request threads, not on database connections.
+- At 200 workers the platform configuration used all 200 Tomcat request threads (default max), so it was saturated on threads as well as connections.
+- Consistency check (closed loop, Little's law: workers ≈ throughput × mean latency): 50 / 383.4 req/s ≈ 130 ms and 200 / 511.5 req/s ≈ 391 ms, in line with p50s of 112.5 ms and 349.6 ms.
+
+Limits: max pending is a peak, not an average. The cause of the drift was not measured (candidates: dead rows from the PATCH updates, laptop thermal state); the database was not reset between runs and the modes were not interleaved. One laptop ran the app, PostgreSQL and the driver. No GC comparison is recorded for A2. Synthetic local workload; not production-capacity evidence.
+
+Next (not done): reset the database between cells and interleave the modes for a clean thread-type comparison; size the pool to what PostgreSQL can serve before comparing thread models again.
+
+Source: `runs/a2s/results.csv` (12 matrix rows plus `vt-off-c200-order-check`; warm-up runs in `runs/a2s-warm` are excluded). Environment: as in A0–A1 and A3.
+
+Authorship: the load driver (closed loop, per-worker sessions, pending-pool watcher) and all runs by Kakali Bandyopadhyay. AI assistance (Claude): the run-order check, analysis and formatting of this section; the load-test setup diagram was drafted with AI assistance.
+
 ## Changed and added files
 
 - `README.md`
