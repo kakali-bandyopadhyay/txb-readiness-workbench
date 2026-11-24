@@ -22,14 +22,15 @@ import java.util.*;
 @Controller
 public class WebController {
     private final WorkbenchService service;
+    private final ActionConcurrencyService actionUpdates;
     private final StabilisationService stabilisation;
     private final ExecutiveSummaryService summaries;
     private final ReleaseService releaseService; private final UatService uatService; private final ControlService controlService;
     private final DecisionService decisionService; private final AuditService auditService; private final DashboardService dashboardService;
-    public WebController(WorkbenchService service, StabilisationService stabilisation, ExecutiveSummaryService summaries,
+    public WebController(WorkbenchService service, ActionConcurrencyService actionUpdates, StabilisationService stabilisation, ExecutiveSummaryService summaries,
                          ReleaseService releaseService, UatService uatService, ControlService controlService,
                          DecisionService decisionService, AuditService auditService, DashboardService dashboardService) {
-        this.service=service; this.stabilisation=stabilisation; this.summaries=summaries;
+        this.service=service; this.actionUpdates=actionUpdates; this.stabilisation=stabilisation; this.summaries=summaries;
         this.releaseService=releaseService; this.uatService=uatService; this.controlService=controlService;
         this.decisionService=decisionService; this.auditService=auditService; this.dashboardService=dashboardService;
     }
@@ -43,7 +44,7 @@ public class WebController {
     @PostMapping("/releases/{id}/summaries") public String generateSummary(@PathVariable long id,@RequestParam(defaultValue="DETERMINISTIC") String mode,Authentication auth){summaries.generate(id,mode,auth.getName());return "redirect:/releases/"+id+"/dashboard";}
     @PostMapping("/summaries/{id}/approve") @org.springframework.security.access.prepost.PreAuthorize("hasRole('READINESS_LEAD')") public String approveSummary(@PathVariable long id,Authentication auth){ExecutiveSummary s=summaries.approve(id,auth.getName());return "redirect:/releases/"+s.releaseId+"/dashboard";}
     public record StabilisationRow(StabilisationException exception,long ageDays){}
-    @PostMapping("/actions/{id}/complete") public String complete(@PathVariable long id,@RequestParam String evidence,Authentication auth){ReadinessAction a=service.actionById(id);String before="status="+a.status; a.evidenceReference=evidence;a.completedBy=auth.getName();a.completedAt=LocalDateTime.now();a.status="COMPLETE";String role=auth.getAuthorities().iterator().next().getAuthority().replace("ROLE_","");service.update(a,auth.getName(),role,"ReadinessAction",id,before,"status=COMPLETE, evidence="+evidence);return "redirect:/releases/"+a.releaseId;}
+    @PostMapping("/actions/{id}/complete") public String complete(@PathVariable long id,@RequestParam String evidence,Authentication auth){String role=auth.getAuthorities().iterator().next().getAuthority().replace("ROLE_","");ReadinessAction a=actionUpdates.update(id,new ActionConcurrencyService.Patch(null,null,"COMPLETE",evidence,auth.getName(),null,null,null),auth.getName(),role).action();return "redirect:/releases/"+a.releaseId;}
     @PostMapping("/defects/{id}/close") public String closeDefect(@PathVariable long id,@RequestParam String notes,Authentication auth){uatService.closeDefect(id,auth.getName(),notes);Defect d=service.defectById(id);return "redirect:/releases/"+d.releaseId+"/uat";}
     @PostMapping("/controls/{id}/signoff") public String signoff(@PathVariable long id,Authentication auth){ControlReview c=controlService.signoff(id,auth.getName());return "redirect:/releases/"+c.releaseId+"/controls";}
     @PostMapping("/releases/{id}/decision") @org.springframework.security.access.prepost.PreAuthorize("hasRole('READINESS_LEAD')") public String decide(@PathVariable long id,@RequestParam String decision,@RequestParam String rationale,@RequestParam(required=false) String condition,@RequestParam(required=false) String conditionOwner,@RequestParam(required=false) LocalDate conditionDue,Authentication auth){

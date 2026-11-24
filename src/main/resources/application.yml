@@ -44,3 +44,7 @@ demo:
     retention:
       max-records: ${DEMO_EVENTS_MAX_RECORDS:500}
     interval-ms: ${DEMO_EVENTS_INTERVAL_MS:1000}
+readiness:
+  action:
+    optimistic-retry-gate:
+      enabled: ${READINESS_ACTION_OPTIMISTIC_RETRY_GATE_ENABLED:false}

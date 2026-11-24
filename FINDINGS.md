@@ -44,7 +44,7 @@ The requested literal Git clone could not be performed: this repository has no r
 - Role permissions: readiness lead decision (`onlyReadinessLeadCanRecordDecision`, `readinessLeadCanRecordHumanDecision`, `onlyReadinessLeadCanPostHtmlDecision`); control partner sign-off (`onlyControlPartnerCanSignOff`, `controlPartnerCanSignOff`); executive viewer read-only (`executiveViewerCanReadDashboard`, `executiveViewerCannotCreateAction`, `executiveViewerCannotApproveSummary`).
 - Region-specific dashboard values: `dashboardRegionFilterChangesSeededReadinessAndDefects`.
 - Event gates and retention: `demoEventProducerIsDisabledByDefault`, `demoEventProducerPublishesOnlyAfterReleaseIsLive`, `stabilisationQueueEvictsOldestAtConfiguredCap`, `syntheticPaymentStatusEventsDefaultToSyntheticLabel`.
-- Final `mvn verify`: **68 tests, 0 failures, 0 errors, 0 skipped**.
+- Before switching the benchmark to gate-disabled pure optimism, full `mvn verify` passed with **70 tests, 0 failures, 0 errors, 0 skipped**. The current gate-disabled benchmark correctly fails when it observes exhausted writers.
 
 ## Source lines by production package
 
@@ -134,7 +134,127 @@ Nonblank Java source lines, excluding comment-only lines:
 - `com.synthetic.readiness.WorkbenchIntegrationTest.dashboardPageRendersPhaseTwoSummaryControls`
 - `com.synthetic.readiness.WorkbenchIntegrationTest.auditApiHasNoDeleteRoute`
 
-Test invocation count from Surefire reports: 68.
+Test inventory above lists the original 68 test methods; after Build A A1 and A3 (concurrency benchmark and session test added), full `mvn verify` reports 71 tests, 0 failures.
+
+## Concurrency & performance (Nov 2026) — A0–A1
+
+Summary (50 concurrent writers on one `readiness_action` row; synthetic data, laptop benchmark):
+
+| Variant | Outcome | Lost updates | Failed callers |
+|---|---|---:|---:|
+| No locking (red baseline, 1 run) | final `update_count` 5/50 | 45 | 0 (silent loss) |
+| Optimistic `@Version`, 5 attempts, exponential jitter (pure, gate off) | exhausted 107–125 of 250 calls per invocation (43–50%), 4 invocations | 0 | 107–125 per 250 (rejected loudly; 409 via the API) |
+| Optimistic + opt-in single-JVM retry gate | 0 exhausted, 3 invocations | 0 | 0 |
+| Pessimistic `PESSIMISTIC_WRITE` (`SELECT … FOR UPDATE`) | 0 failures, 4 invocations | 0 | 0 |
+
+No speed ratio is claimed: pure optimistic batches completed less work than pessimistic ones.
+
+- Scenario is synthetic and uses seeded synthetic readiness actions; it is a local prototype workload, not bank-scale evidence.
+- A0 target: `readiness_action`, updated by `PATCH /api/actions/{id}` and the web action-completion form. The project has no Spring Data repository for this entity; `WorkbenchService` reads it through JPA `EntityManager`, and `ActionConcurrencyService` now owns concurrent writes. Integration tests already use Testcontainers PostgreSQL 17.6; there is no H2 substitution.
+- Red baseline: with `@Version` and the version column removed, 50 writers ran once through the plain read-modify-write path; final `update_count` was **5/50** (expected 50, observed 5). The assertion failed as intended. This was run against Testcontainers PostgreSQL 17.6 on JDK 25.0.4.
+- First versioned attempt: 50 writers, five attempts, flat 1–10 ms jitter; retries exhausted in run 1. The optimistic version check was working, and an exhausted writer propagated through `future.get()`.
+- Implementation: JPA `@Version` in V5; five total attempts; exponential jitter; warn log and HTTP 409 on exhaustion. The optional 64-stripe fair in-process retry gate is controlled by `READINESS_ACTION_OPTIMISTIC_RETRY_GATE_ENABLED` and defaults to `false`. When enabled, it mitigates retry stampedes only within one JVM; it does not coordinate application instances. The database version check remains the cross-instance concurrency control. The comparison path uses `PESSIMISTIC_WRITE` (`SELECT FOR UPDATE`); `update_count` is the lost-update assertion.
+- Historical gated variant: the earlier three warmed invocations used optimistic updates plus the in-process retry gate. These measurements are superseded for the pure optimistic comparison and are retained only as mitigation evidence:
+
+  | Invocation | Optimistic + gate median (ms) | Pessimistic median (ms) | Optimistic range (ms) | Pessimistic range (ms) | Retries | Exhausted |
+  |---|---:|---:|---:|---:|---:|---:|
+  | 1 | 314.256 | 159.430 | 268.641–601.937 | 122.319–195.339 | 224 | 0 |
+  | 2 (`verify`) | 339.021 | 182.600 | 253.204–406.196 | 134.131–206.739 | 218 | 0 |
+  | 3 | 515.631 | 220.258 | 426.486–575.326 | 192.763–315.121 | 225 | 0 |
+
+  Their medians were optimistic + gate **339.021 ms** (314.256–515.631) and pessimistic **182.600 ms** (159.430–220.258). These are local synthetic-workload observations, not the pure optimistic baseline.
+- Pure optimistic comparison: retry gate disabled; one 50-writer warm-up followed by five alternating measured pairs per invocation. All three invocations exhausted optimistic retries:
+
+  ```text
+  CONCURRENCY_BENCHMARK writers=50 runsPerMode=5 warmups=1 order=OP,PO,OP,PO,OP optimisticVariant=pure-optimistic-gate-disabled optimisticMedianMs=258.346 optimisticRangeMs=215.059-331.469 optimisticRetries=730 optimisticConflicts=851 optimisticExhaustedWriters=121 optimisticFailedWriters=121 warmupExhaustedWriters=27 warmupFailedWriters=27 pessimisticMedianMs=216.251 pessimisticRangeMs=155.228-421.665 pessimisticRetries=0 pessimisticConflicts=0 pessimisticExhaustedWriters=0 pessimisticFailedWriters=0 successfulUpdates=379
+  CONCURRENCY_BENCHMARK writers=50 runsPerMode=5 warmups=1 order=OP,PO,OP,PO,OP optimisticVariant=pure-optimistic-gate-disabled optimisticMedianMs=369.697 optimisticRangeMs=305.672-504.317 optimisticRetries=724 optimisticConflicts=846 optimisticExhaustedWriters=122 optimisticFailedWriters=122 warmupExhaustedWriters=26 warmupFailedWriters=26 pessimisticMedianMs=267.113 pessimisticRangeMs=235.919-347.354 pessimisticRetries=0 pessimisticConflicts=0 pessimisticExhaustedWriters=0 pessimisticFailedWriters=0 successfulUpdates=378
+  CONCURRENCY_BENCHMARK writers=50 runsPerMode=5 warmups=1 order=OP,PO,OP,PO,OP optimisticVariant=pure-optimistic-gate-disabled optimisticMedianMs=480.365 optimisticRangeMs=464.832-730.516 optimisticRetries=737 optimisticConflicts=862 optimisticExhaustedWriters=125 optimisticFailedWriters=125 warmupExhaustedWriters=25 warmupFailedWriters=25 pessimisticMedianMs=399.285 pessimisticRangeMs=354.494-481.017 pessimisticRetries=0 pessimisticConflicts=0 pessimisticExhaustedWriters=0 pessimisticFailedWriters=0 successfulUpdates=375
+  ```
+
+  Median of the three invocation medians: pure optimistic **369.697 ms** (258.346–480.365), pessimistic **267.113 ms** (216.251–399.285). The optimistic batches did not complete all 250 updates, so their elapsed times are not an equal-work speed comparison. The reliable finding is repeated exhaustion without the gate; do not state a speed ratio.
+- The three targeted gate-disabled benchmark invocations exhausted optimistic retries and failed the old zero-exhaustion assertion. After changing the test to assert correctness instead, full `mvn verify` passed with **70 tests, 0 failures, 0 errors, 0 skipped**. The full verify benchmark was a fourth, separate confirmation run:
+
+  ```text
+  CONCURRENCY_BENCHMARK writers=50 runsPerMode=5 warmups=1 order=OP,PO,OP,PO,OP optimisticVariant=pure-optimistic-gate-disabled optimisticMedianMs=288.003 optimisticRangeMs=271.013-316.971 optimisticRetries=676 optimisticConflicts=783 optimisticExhaustedWriters=107 optimisticFailedWriters=107 warmupExhaustedWriters=27 warmupFailedWriters=27 pessimisticMedianMs=250.303 pessimisticRangeMs=220.693-331.153 pessimisticRetries=0 pessimisticConflicts=0 pessimisticExhaustedWriters=0 pessimisticFailedWriters=0 successfulUpdates=393 databaseUpdateCount=393
+  ```
+
+  This confirms `update_count` equalled acknowledged successful writes, while exhausted optimistic callers were reported as failures and no pessimistic writer failed. The test does not assert a specific optimistic exhaustion count.
+- Measurement lesson: earlier comparisons always ran optimistic first and varied materially across invocations. Treat those comparisons as cold-start/order biased and exclude their ratios from professional-profile claims. The harness now uses one unmeasured 50-writer warm-up and alternates optimistic/pessimistic order across five measured pairs. The pure optimistic runs omit the optional single-JVM retry gate; do not conflate these results with the gated mitigation variant.
+- ADR: `docs/adr/ADR-001-readiness-action-locking.md`. Diagrams: `docs/diagrams/readiness-action-optimistic-lock.md` and `docs/diagrams/readiness-action-concurrency-benchmark.md`.
+- Back-off: five total attempts; after each of the first four conflicts the delay cap doubles (2, 4, 8, 16 ms) and the actual delay is drawn uniformly from half the cap to the full cap (1–2, 2–4, 4–8, 8–16 ms).
+- Environment: Intel Core i7-1165G7 (4 cores / 8 threads, 2.80 GHz), 16 GB RAM, Windows 11; JDK Eclipse Temurin 25.0.4.1 (25.0.4+101); Maven 3.9.11; PostgreSQL 17.6-alpine via Testcontainers on Docker Desktop 4.96.3 (WSL2, VM memory 8 GB); HikariCP pool 10 (default). Dataset: one synthetic `readiness_action` row per benchmark, created and deleted by the test.
+- Authorship: the concurrency test, red baseline, `@Version` and `PESSIMISTIC_WRITE` fixes, retry/back-off, opt-in retry gate, 409 mapping, benchmark harness, ADR-001 and the two diagrams were hand-coded/written by Kakali Bandyopadhyay. AI assistance (Claude): A0 target analysis, code review comments, and formatting of this FINDINGS section.
+
+## Concurrency & performance (Nov 2026) — A3: JFR profile and one measured fix
+
+A3 was run before A2 by decision (24 Nov): the first A2 run showed 30.6 req/s with p50 1.6 s and zero Hikari pending, so the thread-model comparison would only have measured the hotspot below. A2 runs on the fixed app.
+
+Setup: application jar with platform request threads (`spring.threads.virtual.enabled=false`), Kafka listener and topic auto-creation off, Actuator metrics exposed; PostgreSQL 17.6 via `docker compose up -d db` (not Testcontainers). Load: `loadtest/LoadDriver.java`, closed loop, 50 workers, 30 s warm-up + 60 s measured, fixed-seed mix of 80% `GET /api/releases/1/dashboard` and 20% `PATCH /api/actions/{id}` (owner change, rotated across release 1 actions), HTTP Basic `ops` user. Synthetic data, laptop benchmark.
+
+Diagnosis (before):
+- JFR steady-state profile (`jcmd JFR.start delay=35s duration=50s`, during the measured window): `BCrypt.key` = **99.52% of 4,797 execution samples**; machine CPU **98.5% average**, application JVM user CPU 71.5% average.
+- Max `hikaricp.connections.pending` = 0 and no material blocking events (socket reads averaged 2.8 ms), so the database pool was not the constraint.
+- Cause: every request carried HTTP Basic credentials and the security context was not kept between requests, so each request re-verified the BCrypt password hash on the CPU.
+
+Fix: `SecurityConfig` stores the HTTP Basic authentication in an `HttpSessionSecurityContextRepository`; later requests that carry the session cookie are not re-hashed. The load driver gives each worker its own `HttpClient` and `CookieManager` (one worker = one logged-in client) behind a `--sessions true|false` flag. Both server and client behaviour change: before = stateless client sending Basic on every request; after = session-reusing client. An integration test checks that a Basic-authenticated request creates a session and that a PATCH carrying only that session returns 200.
+
+| Platform threads, 50 concurrent (median of 3 runs) | Before | After |
+|---|---:|---:|
+| Throughput (req/s) | 38.6 | **399.4** |
+| p50 (ms) | 1,280 | **110.6** |
+| p95 (ms) | 1,545 | **264.8** |
+| p99 (ms) | 2,132 | **398.3** |
+| Errors / 409s | 0 / 0 | 0 / 0 |
+| Max Hikari pending | 0 | 40 |
+| JFR top method (profiling run) | `BCrypt.key` 99.5% | none dominant (`HashMap.getNode` 2.9%) |
+| App JVM user CPU, avg (profiling run) | 71.5% | 13.2% |
+| GC pauses in 50 s profile (count / total / max) | 10 / 28.6 ms / 5.3 ms | 73 / 309 ms / 11.8 ms |
+
+Per-run results (throughput req/s, p50, p95, p99 ms): before r1 38.6, 1,280, 1,430, 1,489; r2 44.7, 1,065, 1,545, 2,132; r3 36.3, 1,362, 1,795, 2,286. After r1 265.1, 146.5, 478.1, 772.4; r2 399.4, 110.6, 264.8, 398.3; r3 448.2, 103.7, 224.6, 320.7. Profiling runs (JFR attached, excluded from medians): before r4 33.4 req/s, p50 1,536 ms; after r4 315.6 req/s, p50 123.9 ms.
+
+Observations:
+- Throughput rose about 10× and p95 fell about 83% with the same hardware and request mix.
+- The bottleneck moved: after the fix, 40 of 50 workers waited for one of the 10 pooled database connections while application CPU averaged 13%. This is the starting point for A2.
+- GC is not a factor in either state: more pauses after the fix reflect ~10× more requests; pause time per request is similar and the maximum pause (11.8 ms) is under 5% of p95.
+- After-runs rose from r1 to r3 (265 → 399 → 448 req/s): r1 started right after an application restart, before the JIT had fully warmed. A2 adds one unrecorded warm-up run after each restart.
+- Allocation rate was not captured.
+- Profiling lesson: a JFR recording started with `-XX:StartFlightRecording=delay=…,duration=…` produced an empty file in this setup, and a manually timed `jcmd JFR.start` once profiled an idle app; `jcmd JFR.start delay=35s` started immediately before the driver gave a clean steady-state profile.
+
+Trade-offs: server-side sessions add state, timeout and fixation concerns (Spring Security's default session-fixation protection is kept; CSRF stays enabled for web routes and is ignored only for `/api/**`). For a multi-instance API, token authentication (OAuth2/JWT) avoids both per-request password hashing and server session state.
+
+Environment: as in A0–A1 (i7-1165G7 4C/8T, 16 GB, Temurin 25.0.4.1), plus PostgreSQL 17.6-alpine via Docker Compose, HikariCP pool 10, Tomcat platform threads (default max 200).
+
+Authorship: the session-backed authentication change, the session integration test and the load driver (including per-worker cookies and the `--sessions` flag) were hand-coded by Kakali Bandyopadhyay. AI assistance (Claude): the BCrypt hypothesis, the choice of JFR views, review comments, and formatting of this section.
+
+## Concurrency & performance (Nov 2026) — A2: platform and virtual request threads
+
+Question: once the BCrypt hotspot is gone (A3), does running Tomcat request handling on virtual threads (`spring.threads.virtual.enabled=true`) raise throughput?
+
+Setup: the fixed session-backed app, PostgreSQL 17.6 via Docker Compose, HikariCP pool 10, Kafka listener off, and the closed-loop HTTP load driver in `loadtest/LoadDriver.java` (driver always on virtual threads; only the server setting changes). Each worker keeps its own HTTP client and session; the request mix is 80% `GET /api/releases/1/dashboard` and 20% `PATCH /api/actions/{id}` rotated across release 1's actions, with a fixed random seed. One unrecorded warm-up run after each app restart; then three runs per cell, each a 30-second warm-up window followed by 60 measured seconds. The setup is diagrammed in `docs/diagrams/loadtest-setup.md`.
+
+| Workers | Request threads | Throughput median (range), req/s | p50 median (range), ms | p95 median (range), ms | p99 median (range), ms | Errors / 409s | Max Hikari pending (range) |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 50 | Platform | 383.4 (349.4–412.4) | 112.5 (105.7–120.7) | 293.4 (263.7–326.4) | 440.9 (440.1–519.0) | 0 / 0 | 40 (40–40) |
+| 50 | Virtual | 357.0 (280.7–435.7) | 124.8 (107.3–145.3) | 298.3 (234.7–428.2) | 427.9 (309.1–626.0) | 0 / 0 | 40 (40–40) |
+| 200 | Platform | 511.5 (419.4–514.7) | 349.6 (347.7–412.5) | 887.8 (879.3–1,146.6) | 1,159.0 (1,151.2–1,605.9) | 0 / 0 | 190 (189–190) |
+| 200 | Virtual | 419.9 (347.9–443.9) | 428.2 (420.8–483.5) | 1,059.4 (970.3–1,430.5) | 1,452.4 (1,233.2–2,092.8) | 0 / 0 | 190 (190–190) |
+
+Order check: all platform runs were made before all virtual runs. One further platform-thread run at 200 workers, after the virtual runs, a fresh restart and a warm-up (`vt-off-c200-order-check`): 265.7 req/s, p50 524.2 ms, p95 2,159.9 ms, p99 3,946.8 ms, 1 error, max pending 189. That is below every virtual 200-worker run (347.9–443.9 req/s) and about half the earlier platform median (511.5 req/s). It is a single run.
+
+Result:
+- Virtual threads gave no throughput gain at either concurrency. At 50 workers the medians differ by 7% and the ranges overlap.
+- At 200 workers the earlier platform-vs-virtual gap (511.5 vs 419.9 req/s) did not reproduce: the later platform run was slower than any virtual run. Throughput drifted downwards across the session whatever the thread type, so no thread-type difference is claimed at 200 workers.
+- Both modes were bound by the 10-connection Hikari pool: max pending 40 at 50 workers and 189–190 at 200 workers (200 workers minus 10 active connections). Virtual threads remove the limit on request threads, not on database connections.
+- At 200 workers the platform configuration used all 200 Tomcat request threads (default max), so it was saturated on threads as well as connections.
+- Consistency check (closed loop, Little's law: workers ≈ throughput × mean latency): 50 / 383.4 req/s ≈ 130 ms and 200 / 511.5 req/s ≈ 391 ms, in line with p50s of 112.5 ms and 349.6 ms.
+
+Limits: max pending is a peak, not an average. The cause of the drift was not established. Dead rows were checked after the runs and ruled out (at most 10 dead rows in any table, `pg_stat_user_tables`); `audit_event` had grown to 112,196 rows (each PATCH writes an audit row), but the dashboard query does not read it. Laptop thermal state was not recorded; the database was not reset between runs and the modes were not interleaved. One laptop ran the app, PostgreSQL and the driver. No GC comparison is recorded for A2. Synthetic local workload; not production-capacity evidence.
+
+Next (not done): reset the database between cells and interleave the modes for a clean thread-type comparison; size the pool to what PostgreSQL can serve before comparing thread models again.
+
+Source: `runs/a2s/results.csv` (12 matrix rows plus `vt-off-c200-order-check`; warm-up runs in `runs/a2s-warm` are excluded). Environment: as in A0–A1 and A3.
+
+Authorship: the load driver (closed loop, per-worker sessions, pending-pool watcher), the load-test setup diagram and all runs by Kakali Bandyopadhyay. AI assistance (Claude): the run-order check, analysis and formatting of this section.
 
 ## Changed and added files
 
