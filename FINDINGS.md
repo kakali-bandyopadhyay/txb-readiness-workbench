@@ -248,7 +248,7 @@ Result:
 - At 200 workers the platform configuration used all 200 Tomcat request threads (default max), so it was saturated on threads as well as connections.
 - Consistency check (closed loop, Little's law: workers ≈ throughput × mean latency): 50 / 383.4 req/s ≈ 130 ms and 200 / 511.5 req/s ≈ 391 ms, in line with p50s of 112.5 ms and 349.6 ms.
 
-Limits: max pending is a peak, not an average. The cause of the drift was not measured (candidates: dead rows from the PATCH updates, laptop thermal state); the database was not reset between runs and the modes were not interleaved. One laptop ran the app, PostgreSQL and the driver. No GC comparison is recorded for A2. Synthetic local workload; not production-capacity evidence.
+Limits: max pending is a peak, not an average. The cause of the drift was not established. Dead rows were checked after the runs and ruled out (at most 10 dead rows in any table, `pg_stat_user_tables`); `audit_event` had grown to 112,196 rows (each PATCH writes an audit row), but the dashboard query does not read it. Laptop thermal state was not recorded; the database was not reset between runs and the modes were not interleaved. One laptop ran the app, PostgreSQL and the driver. No GC comparison is recorded for A2. Synthetic local workload; not production-capacity evidence.
 
 Next (not done): reset the database between cells and interleave the modes for a clean thread-type comparison; size the pool to what PostgreSQL can serve before comparing thread models again.
 
