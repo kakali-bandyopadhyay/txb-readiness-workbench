@@ -10,6 +10,8 @@ import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.crypto.factory.PasswordEncoderFactories;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
+import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 
 @Configuration @EnableMethodSecurity
@@ -24,14 +26,20 @@ public class SecurityConfig {
             User.withUsername("product").password(encoder.encode("demo-product")).roles("PRODUCT_PARTNER").build(),
             User.withUsername("viewer").password(encoder.encode("demo-viewer")).roles("EXECUTIVE_VIEWER").build());
     }
-    @Bean SecurityFilterChain security(HttpSecurity http) throws Exception {
+    @Bean SecurityContextRepository securityContextRepository() {
+        return new HttpSessionSecurityContextRepository();
+    }
+    @Bean SecurityFilterChain security(HttpSecurity http, SecurityContextRepository securityContextRepository) throws Exception {
         return http.csrf(csrf -> csrf.ignoringRequestMatchers("/api/**"))
+            .securityContext(context -> context.securityContextRepository(securityContextRepository))
             .authorizeHttpRequests(a -> a.requestMatchers("/", "/css/**", "/actuator/health/**", "/api/**", "/swagger-ui/**", "/v3/api-docs/**").permitAll()
                 .requestMatchers("/decision/**").hasRole("READINESS_LEAD")
                 .requestMatchers("/controls/**").hasRole("CONTROL_PARTNER")
                 .requestMatchers("/actions/**").hasAnyRole("TEAM_OWNER", "READINESS_LEAD", "PRODUCT_PARTNER")
                 .anyRequest().authenticated())
-            .formLogin(Customizer.withDefaults()).httpBasic(Customizer.withDefaults()).logout(Customizer.withDefaults()).build();
+            .formLogin(Customizer.withDefaults())
+            .httpBasic(basic -> basic.securityContextRepository(securityContextRepository))
+            .logout(Customizer.withDefaults()).build();
     }
 }
 

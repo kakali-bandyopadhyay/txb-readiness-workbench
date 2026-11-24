@@ -8,3 +8,6 @@ build/
 docs/media/
 out/
 .DS_Store
+
+runs/
+*.jfr

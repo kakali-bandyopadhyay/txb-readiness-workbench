@@ -134,7 +134,7 @@ Nonblank Java source lines, excluding comment-only lines:
 - `com.synthetic.readiness.WorkbenchIntegrationTest.dashboardPageRendersPhaseTwoSummaryControls`
 - `com.synthetic.readiness.WorkbenchIntegrationTest.auditApiHasNoDeleteRoute`
 
-Test inventory contains 68 test methods; full `mvn verify` reports 70 invocations including parameterized cases.
+Test inventory above lists the original 68 test methods; after Build A A1 and A3 (concurrency benchmark and session test added), full `mvn verify` reports 71 tests, 0 failures.
 
 ## Concurrency & performance (Nov 2026) — A0–A1
 
@@ -184,6 +184,47 @@ No speed ratio is claimed: pure optimistic batches completed less work than pess
 - Back-off: five total attempts; after each of the first four conflicts the delay cap doubles (2, 4, 8, 16 ms) and the actual delay is drawn uniformly from half the cap to the full cap (1–2, 2–4, 4–8, 8–16 ms).
 - Environment: Intel Core i7-1165G7 (4 cores / 8 threads, 2.80 GHz), 16 GB RAM, Windows 11; JDK Eclipse Temurin 25.0.4.1 (25.0.4+101); Maven 3.9.11; PostgreSQL 17.6-alpine via Testcontainers on Docker Desktop 4.96.3 (WSL2, VM memory 8 GB); HikariCP pool 10 (default). Dataset: one synthetic `readiness_action` row per benchmark, created and deleted by the test.
 - Authorship: the concurrency test, red baseline, `@Version` and `PESSIMISTIC_WRITE` fixes, retry/back-off, opt-in retry gate, 409 mapping, benchmark harness, ADR-001 and the two diagrams were hand-coded/written by Kakali Bandyopadhyay. AI assistance (Claude): A0 target analysis, code review comments, and formatting of this FINDINGS section.
+
+## Concurrency & performance (Nov 2026) — A3: JFR profile and one measured fix
+
+A3 was run before A2 by decision (24 Nov): the first A2 run showed 30.6 req/s with p50 1.6 s and zero Hikari pending, so the thread-model comparison would only have measured the hotspot below. A2 runs on the fixed app.
+
+Setup: application jar with platform request threads (`spring.threads.virtual.enabled=false`), Kafka listener and topic auto-creation off, Actuator metrics exposed; PostgreSQL 17.6 via `docker compose up -d db` (not Testcontainers). Load: `loadtest/LoadDriver.java`, closed loop, 50 workers, 30 s warm-up + 60 s measured, fixed-seed mix of 80% `GET /api/releases/1/dashboard` and 20% `PATCH /api/actions/{id}` (owner change, rotated across release 1 actions), HTTP Basic `ops` user. Synthetic data, laptop benchmark.
+
+Diagnosis (before):
+- JFR steady-state profile (`jcmd JFR.start delay=35s duration=50s`, during the measured window): `BCrypt.key` = **99.52% of 4,797 execution samples**; machine CPU **98.5% average**, application JVM user CPU 71.5% average.
+- Max `hikaricp.connections.pending` = 0 and no material blocking events (socket reads averaged 2.8 ms), so the database pool was not the constraint.
+- Cause: every request carried HTTP Basic credentials and the security context was not kept between requests, so each request re-verified the BCrypt password hash on the CPU.
+
+Fix: `SecurityConfig` stores the HTTP Basic authentication in an `HttpSessionSecurityContextRepository`; later requests that carry the session cookie are not re-hashed. The load driver gives each worker its own `HttpClient` and `CookieManager` (one worker = one logged-in client) behind a `--sessions true|false` flag. Both server and client behaviour change: before = stateless client sending Basic on every request; after = session-reusing client. An integration test checks that a Basic-authenticated request creates a session and that a PATCH carrying only that session returns 200.
+
+| Platform threads, 50 concurrent (median of 3 runs) | Before | After |
+|---|---:|---:|
+| Throughput (req/s) | 38.6 | **399.4** |
+| p50 (ms) | 1,280 | **110.6** |
+| p95 (ms) | 1,545 | **264.8** |
+| p99 (ms) | 2,132 | **398.3** |
+| Errors / 409s | 0 / 0 | 0 / 0 |
+| Max Hikari pending | 0 | 40 |
+| JFR top method (profiling run) | `BCrypt.key` 99.5% | none dominant (`HashMap.getNode` 2.9%) |
+| App JVM user CPU, avg (profiling run) | 71.5% | 13.2% |
+| GC pauses in 50 s profile (count / total / max) | 10 / 28.6 ms / 5.3 ms | 73 / 309 ms / 11.8 ms |
+
+Per-run results (throughput req/s, p50, p95, p99 ms): before r1 38.6, 1,280, 1,430, 1,489; r2 44.7, 1,065, 1,545, 2,132; r3 36.3, 1,362, 1,795, 2,286. After r1 265.1, 146.5, 478.1, 772.4; r2 399.4, 110.6, 264.8, 398.3; r3 448.2, 103.7, 224.6, 320.7. Profiling runs (JFR attached, excluded from medians): before r4 33.4 req/s, p50 1,536 ms; after r4 315.6 req/s, p50 123.9 ms.
+
+Observations:
+- Throughput rose about 10× and p95 fell about 83% with the same hardware and request mix.
+- The bottleneck moved: after the fix, 40 of 50 workers waited for one of the 10 pooled database connections while application CPU averaged 13%. This is the starting point for A2.
+- GC is not a factor in either state: more pauses after the fix reflect ~10× more requests; pause time per request is similar and the maximum pause (11.8 ms) is under 5% of p95.
+- After-runs rose from r1 to r3 (265 → 399 → 448 req/s): r1 started right after an application restart, before the JIT had fully warmed. A2 adds one unrecorded warm-up run after each restart.
+- Allocation rate was not captured.
+- Profiling lesson: a JFR recording started with `-XX:StartFlightRecording=delay=…,duration=…` produced an empty file in this setup, and a manually timed `jcmd JFR.start` once profiled an idle app; `jcmd JFR.start delay=35s` started immediately before the driver gave a clean steady-state profile.
+
+Trade-offs: server-side sessions add state, timeout and fixation concerns (Spring Security's default session-fixation protection is kept; CSRF stays enabled for web routes and is ignored only for `/api/**`). For a multi-instance API, token authentication (OAuth2/JWT) avoids both per-request password hashing and server session state.
+
+Environment: as in A0–A1 (i7-1165G7 4C/8T, 16 GB, Temurin 25.0.4.1), plus PostgreSQL 17.6-alpine via Docker Compose, HikariCP pool 10, Tomcat platform threads (default max 200).
+
+Authorship: the session-backed authentication change, the session integration test and the load driver (including per-worker cookies and the `--sessions` flag) were hand-coded by Kakali Bandyopadhyay. AI assistance (Claude): the BCrypt hypothesis, the choice of JFR views, review comments, and formatting of this section.
 
 ## Changed and added files
 

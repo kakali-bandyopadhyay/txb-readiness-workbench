@@ -86,6 +86,17 @@ class WorkbenchIntegrationTest {
         var response = new ApiErrors().optimisticConflict(new jakarta.persistence.OptimisticLockException("synthetic conflict"));
         org.junit.jupiter.api.Assertions.assertEquals(org.springframework.http.HttpStatus.CONFLICT, response.getStatusCode());
     }
+    @Test void basicAuthenticationIsSavedAndReusedFromHttpSession() throws Exception {
+        String basic = "Basic " + java.util.Base64.getEncoder().encodeToString("ops:demo-ops".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var login = mvc.perform(get("/api/releases/1/actions").header("Authorization", basic))
+            .andExpect(status().isOk()).andReturn();
+        var session = login.getRequest().getSession(false);
+        org.junit.jupiter.api.Assertions.assertNotNull(session, "Basic authentication should create an HTTP session");
+
+        mvc.perform(patch("/api/actions/1").session((org.springframework.mock.web.MockHttpSession) session)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"owner\":\"Session Load Test\"}"))
+            .andExpect(status().isOk());
+    }
     @Test @Tag("concurrency") @Transactional(propagation=Propagation.NOT_SUPPORTED)
     void readinessActionConcurrentUpdatesAreNotLostAndCompareLockModes() throws Exception {
         org.junit.jupiter.api.Assertions.assertFalse(actionUpdates.isOptimisticRetryGateEnabled(),
