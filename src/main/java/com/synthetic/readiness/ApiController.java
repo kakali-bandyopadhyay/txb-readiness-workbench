@@ -22,14 +22,15 @@ import java.util.*;
 @RestController @RequestMapping("/api")
 public class ApiController {
     private final WorkbenchService service;
+    private final ActionConcurrencyService actionUpdates;
     private final StabilisationService stabilisation;
     private final ExecutiveSummaryService summaries;
     private final ReleaseService releaseService; private final UatService uatService; private final ControlService controlService;
     private final DecisionService decisionService; private final AuditService auditService; private final DashboardService dashboardService;
-    public ApiController(WorkbenchService service, StabilisationService stabilisation, ExecutiveSummaryService summaries,
+    public ApiController(WorkbenchService service, ActionConcurrencyService actionUpdates, StabilisationService stabilisation, ExecutiveSummaryService summaries,
                          ReleaseService releaseService, UatService uatService, ControlService controlService,
                          DecisionService decisionService, AuditService auditService, DashboardService dashboardService) {
-        this.service=service; this.stabilisation=stabilisation; this.summaries=summaries;
+        this.service=service; this.actionUpdates=actionUpdates; this.stabilisation=stabilisation; this.summaries=summaries;
         this.releaseService=releaseService; this.uatService=uatService; this.controlService=controlService;
         this.decisionService=decisionService; this.auditService=auditService; this.dashboardService=dashboardService;
     }
@@ -44,10 +45,10 @@ public class ApiController {
     @PostMapping("/releases/{id}/actions") @PreAuthorize("hasAnyRole('TEAM_OWNER','READINESS_LEAD','PRODUCT_PARTNER')")
     public ReadinessAction createAction(@PathVariable long id,@Valid @RequestBody ActionCreate in,Authentication auth){ReadinessAction a=new ReadinessAction();a.releaseId=id;a.category=in.category();a.title=in.title();a.owner=in.owner();a.dueDate=in.dueDate();a.mandatory=in.mandatory();a.dependency=in.dependency();a.status="NOT_STARTED";return service.create(a,auth.getName(),role(auth),"ReadinessAction",a.title);}
     @PatchMapping("/actions/{id}") @PreAuthorize("hasAnyRole('TEAM_OWNER','READINESS_LEAD','PRODUCT_PARTNER')")
-    public ReadinessAction updateAction(@PathVariable long id,@RequestBody ActionUpdate in,Authentication auth){ReadinessAction a=service.actionById(id);if(a==null)throw new NoSuchElementException();String before=summary(a);if(in.owner()!=null)a.owner=in.owner();if(in.dueDate()!=null)a.dueDate=LocalDate.parse(in.dueDate());if(in.evidenceReference()!=null)a.evidenceReference=in.evidenceReference();if(in.completedBy()!=null)a.completedBy=in.completedBy();if(in.exceptionAccepted()!=null)a.exceptionAccepted=Boolean.parseBoolean(in.exceptionAccepted());if(in.exceptionApprover()!=null)a.exceptionApprover=in.exceptionApprover();if(in.exceptionRationale()!=null)a.exceptionRationale=in.exceptionRationale();
-        boolean canComplete=(a.completedBy!=null&&!a.completedBy.isBlank()&&a.evidenceReference!=null&&!a.evidenceReference.isBlank())||(a.exceptionAccepted&&a.exceptionApprover!=null&&!a.exceptionApprover.isBlank()&&a.exceptionRationale!=null&&!a.exceptionRationale.isBlank());
-        if("COMPLETE".equalsIgnoreCase(in.status())&&!canComplete)throw new IllegalArgumentException("Completion requires owner completion and evidence, or an accepted exception with approver and rationale.");
-        if(in.status()!=null)a.status=in.status().toUpperCase(Locale.ROOT);if("COMPLETE".equals(a.status))a.completedAt=LocalDateTime.now();return service.update(a,auth.getName(),role(auth),"ReadinessAction",id,before,summary(a));}
+    public ReadinessAction updateAction(@PathVariable long id,@RequestBody ActionUpdate in,Authentication auth){
+        ActionConcurrencyService.Patch patch = new ActionConcurrencyService.Patch(in.owner(), in.dueDate()==null?null:LocalDate.parse(in.dueDate()), in.status(), in.evidenceReference(), in.completedBy(), in.exceptionAccepted()==null?null:Boolean.parseBoolean(in.exceptionAccepted()), in.exceptionApprover(), in.exceptionRationale());
+        return actionUpdates.update(id, patch, auth.getName(), role(auth)).action();
+    }
     @GetMapping("/releases/{id}/scenarios") public List<UatScenario> scenarios(@PathVariable long id){return uatService.scenarios(id);}
     @PostMapping("/releases/{id}/scenarios") @PreAuthorize("hasAnyRole('UAT_LEAD','READINESS_LEAD')") public UatScenario createScenario(@PathVariable long id,@RequestBody ScenarioCreate in,Authentication auth){UatScenario s=new UatScenario();s.releaseId=id;s.name=in.name();s.expectedResult=in.expectedResult();s.participant=in.participant();s.executionStatus=in.executionStatus()==null?"NOT_RUN":in.executionStatus();return service.create(s,auth.getName(),role(auth),"UatScenario",s.name);}
     @PatchMapping("/scenarios/{id}") @PreAuthorize("hasAnyRole('UAT_LEAD','READINESS_LEAD')") public UatScenario updateScenario(@PathVariable long id,@RequestBody ScenarioUpdate in,Authentication auth){UatScenario s=service.scenarioById(id);if(s==null)throw new NoSuchElementException("Scenario not found");String before=s.executionStatus;if(in.executionStatus()!=null)s.executionStatus=in.executionStatus().toUpperCase(Locale.ROOT);if(in.participant()!=null)s.participant=in.participant();return service.update(s,auth.getName(),role(auth),"UatScenario",id,before,s.executionStatus);}
@@ -68,7 +69,6 @@ public class ApiController {
     @PostMapping("/conditions/{id}/close") @PreAuthorize("hasRole('READINESS_LEAD')") public Map<String,String> closeCondition(@PathVariable long id,Authentication auth){decisionService.closeCondition(id,auth.getName());return Map.of("status","closed");}
     @GetMapping("/audit") public List<AuditEvent> audit(){return auditService.events();}
     private String role(Authentication auth){return auth.getAuthorities().iterator().next().getAuthority().replace("ROLE_","");}
-    private String summary(ReadinessAction a){return "status="+a.status+", owner="+a.owner+", evidence="+a.evidenceReference+", exception="+a.exceptionAccepted;}
 }
 
 

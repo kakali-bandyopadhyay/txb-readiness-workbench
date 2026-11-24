@@ -10,6 +10,7 @@ import com.synthetic.readiness.stabilisation.*;
 import com.synthetic.readiness.summary.*;
 
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.Tag;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -17,6 +18,8 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -40,6 +43,8 @@ class WorkbenchIntegrationTest {
     @DynamicPropertySource static void database(DynamicPropertyRegistry p){p.add("spring.datasource.url",postgres::getJdbcUrl);p.add("spring.datasource.username",postgres::getUsername);p.add("spring.datasource.password",postgres::getPassword);p.add("spring.kafka.bootstrap-servers",kafka::getBootstrapServers);}
     @Autowired MockMvc mvc;
     @Autowired WorkbenchService service;
+    @Autowired ActionConcurrencyService actionUpdates;
+    @Autowired JdbcTemplate jdbc;
     @Autowired KafkaTemplate<String,String> kafkaTemplate;
     @Autowired StabilisationService stabilisation;
     @Autowired ExecutiveSummaryService summaries;
@@ -77,6 +82,56 @@ class WorkbenchIntegrationTest {
     @Test void executiveViewerCannotCreateAction() throws Exception { mvc.perform(post("/api/releases/1/actions").with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user("viewer").roles("EXECUTIVE_VIEWER")).contentType(MediaType.APPLICATION_JSON).content("{\"category\":\"PROCEDURE\",\"title\":\"Synthetic check\",\"owner\":\"Mira Sen\",\"dueDate\":\"2026-12-01\",\"mandatory\":true}" )).andExpect(status().isForbidden()); }
     @Test void actionCannotBeCompletedWithoutEvidence() throws Exception { mvc.perform(patch("/api/actions/3").with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user("ops").roles("TEAM_OWNER")).contentType(MediaType.APPLICATION_JSON).content("{\"status\":\"COMPLETE\",\"completedBy\":\"ops\"}")).andExpect(status().isBadRequest()); }
     @Test void actionCompletionWithEvidencePersistsAndAudits() throws Exception { mvc.perform(patch("/api/actions/3").with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user("ops").roles("TEAM_OWNER")).contentType(MediaType.APPLICATION_JSON).content("{\"status\":\"COMPLETE\",\"completedBy\":\"ops\",\"evidenceReference\":\"SYNTH-ACTION-REF\"}")).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("COMPLETE"));org.junit.jupiter.api.Assertions.assertTrue(service.audit().stream().anyMatch(a->"ReadinessAction".equals(a.entityName)&&"UPDATE".equals(a.action))); }
+    @Test @Tag("concurrency") @Transactional(propagation=Propagation.NOT_SUPPORTED)
+    void readinessActionConcurrentUpdatesAreNotLostAndCompareLockModes() throws Exception {
+        ReadinessAction action = new ReadinessAction();
+        action.releaseId=1L; action.region="North"; action.category="CONCURRENCY_TEST"; action.title="Synthetic concurrency probe";
+        action.owner="Synthetic test"; action.dueDate=java.time.LocalDate.of(2026,12,1); action.mandatory=false; action.status="NOT_STARTED";
+        service.create(action,"concurrency-test","TEST","ReadinessAction",action.title);
+        try {
+            benchmark(action.id, 50, 1, false);
+            int finalCount = jdbc.queryForObject("select update_count from readiness_action where id=?", Integer.class, action.id);
+            org.junit.jupiter.api.Assertions.assertEquals(50, finalCount);
+        } finally {
+            jdbc.update("delete from readiness_action where id=?", action.id);
+        }
+    }
+    private record Benchmark(double medianMs, long retries, long conflicts) {}
+    private record Run(double elapsedMs, long retries, long conflicts) {}
+    private Benchmark benchmark(long actionId, int writers, int runs, boolean pessimistic) throws Exception {
+        java.util.List<Run> samples = new java.util.ArrayList<>();
+        for (int run = 0; run < runs; run++) {
+            long conflictsBefore = actionUpdates.optimisticConflicts();
+            long retriesBefore = actionUpdates.optimisticRetries();
+            var ready = new java.util.concurrent.CountDownLatch(writers);
+            var start = new java.util.concurrent.CountDownLatch(1);
+            var pool = java.util.concurrent.Executors.newFixedThreadPool(writers);
+            long began = System.nanoTime();
+            try {
+                var futures = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+                for (int n = 0; n < writers; n++) futures.add(pool.submit(() -> {
+                    ready.countDown();
+                    if (!start.await(10, java.util.concurrent.TimeUnit.SECONDS)) throw new IllegalStateException("Start gate timed out");
+                    var patch = new ActionConcurrencyService.Patch(null, null, null, null, null, null, null, null);
+                    if (pessimistic) actionUpdates.updatePessimistic(actionId, patch, "concurrency-test", "TEST");
+                    else actionUpdates.update(actionId, patch, "concurrency-test", "TEST");
+                    return null;
+                }));
+                org.junit.jupiter.api.Assertions.assertTrue(ready.await(10, java.util.concurrent.TimeUnit.SECONDS));
+                start.countDown();
+                for (var future : futures) future.get(30, java.util.concurrent.TimeUnit.SECONDS);
+                samples.add(new Run((System.nanoTime() - began) / 1_000_000.0,
+                    actionUpdates.optimisticRetries() - retriesBefore,
+                    actionUpdates.optimisticConflicts() - conflictsBefore));
+            } finally {
+                start.countDown();
+                pool.shutdownNow();
+            }
+        }
+        var ordered = samples.stream().sorted(java.util.Comparator.comparingDouble(Run::elapsedMs)).toList();
+        return new Benchmark(ordered.get(runs / 2).elapsedMs(), ordered.stream().mapToLong(Run::retries).sum(),
+            ordered.stream().mapToLong(Run::conflicts).sum());
+    }
     @Test void onlyReadinessLeadCanRecordDecision() throws Exception { mvc.perform(post("/api/releases/1/decisions").with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user("ops").roles("TEAM_OWNER")).contentType(MediaType.APPLICATION_JSON).content("{\"decision\":\"GO\",\"rationale\":\"Synthetic\"}")).andExpect(status().isForbidden()); }
     @Test void readinessLeadCanRecordHumanDecision() throws Exception { mvc.perform(post("/api/releases/1/decisions").with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user("lead").roles("READINESS_LEAD")).contentType(MediaType.APPLICATION_JSON).content("{\"decision\":\"CONDITIONAL_GO\",\"rationale\":\"Illustrative\",\"conditions\":[{\"description\":\"Confirm routing\",\"owner\":\"Nila Roy\",\"dueDate\":\"2026-12-01\"}]}")).andExpect(status().isOk()).andExpect(jsonPath("$.recordedBy").value("lead")); }
     @Test void conditionalGoNeedsCondition() throws Exception { mvc.perform(post("/api/releases/1/decisions").with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user("lead").roles("READINESS_LEAD")).contentType(MediaType.APPLICATION_JSON).content("{\"decision\":\"CONDITIONAL_GO\",\"rationale\":\"Illustrative\",\"conditions\":[]}")).andExpect(status().isBadRequest()); }

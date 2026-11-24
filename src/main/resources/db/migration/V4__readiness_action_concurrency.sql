@@ -1,0 +1,1 @@
+ALTER TABLE readiness_action ADD COLUMN update_count INTEGER NOT NULL DEFAULT 0;

@@ -136,6 +136,17 @@ Nonblank Java source lines, excluding comment-only lines:
 
 Test invocation count from Surefire reports: 68.
 
+## Concurrency & performance (Nov 2026) — A0–A1 kickoff
+
+- Scenario is synthetic and uses seeded synthetic readiness actions; it is a local prototype workload, not bank-scale evidence.
+- A0 target: `readiness_action`, updated by `PATCH /api/actions/{id}` and the web action-completion form. The project has no Spring Data repository for this entity; `WorkbenchService` reads it through JPA `EntityManager`, and `ActionConcurrencyService` now owns concurrent writes. Integration tests already use Testcontainers PostgreSQL 17.6; there is no H2 substitution.
+- Red baseline: with `@Version` and the version column removed, 50 writers ran once through the plain read-modify-write path; final `update_count` was **5/50** (expected 50, observed 5). The assertion failed as intended. This was run against Testcontainers PostgreSQL 17.6 on JDK 25.0.4 using the cached JUnit launcher because Maven is not installed in this environment.
+- Prior versioned attempt (run result supplied by the developer): 50 writers, five attempts, flat 1–10 ms jitter; retries exhausted in run 1. The optimistic version check was working, and an exhausted writer propagated through `future.get()`.
+- Green design: add JPA `@Version` in V5, retain five bounded attempts with a back-off that grows per attempt plus jitter, log exhausted writers, and keep `PESSIMISTIC_WRITE` (`SELECT FOR UPDATE`) for comparison. `update_count` is the lost-update assertion.
+- The green benchmark will run 50 writers for five rounds per lock mode, assert all 500 increments, and print median wall time, optimistic retries/conflicts, and exhausted writers. Green timing results remain pending.
+- ADR: `docs/adr/ADR-001-readiness-action-locking.md`. Diagrams: `docs/diagrams/readiness-action-optimistic-lock.md` and `docs/diagrams/readiness-action-concurrency-benchmark.md`.
+- JDK build, laptop CPU/RAM, dataset size beyond the seeded row, and run outputs remain to be recorded with the A2–A4 measurements.
+
 ## Changed and added files
 
 - `README.md`
