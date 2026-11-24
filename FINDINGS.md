@@ -254,7 +254,7 @@ Next (not done): reset the database between cells and interleave the modes for a
 
 Source: `runs/a2s/results.csv` (12 matrix rows plus `vt-off-c200-order-check`; warm-up runs in `runs/a2s-warm` are excluded). Environment: as in A0–A1 and A3.
 
-Authorship: the load driver (closed loop, per-worker sessions, pending-pool watcher) and all runs by Kakali Bandyopadhyay. AI assistance (Claude): the run-order check, analysis and formatting of this section; the load-test setup diagram was drafted with AI assistance.
+Authorship: the load driver (closed loop, per-worker sessions, pending-pool watcher), the load-test setup diagram and all runs by Kakali Bandyopadhyay. AI assistance (Claude): the run-order check, analysis and formatting of this section.
 
 ## Changed and added files
 
