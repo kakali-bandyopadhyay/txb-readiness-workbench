@@ -4,6 +4,9 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.PersistenceContext;
 import org.springframework.dao.OptimisticLockingFailureException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -14,6 +17,7 @@ import java.util.Locale;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Service
 public class ActionConcurrencyService {
@@ -23,10 +27,15 @@ public class ActionConcurrencyService {
     public record UpdateResult(ReadinessAction action, int retries, long elapsedNanos) {}
 
     private static final int MAX_ATTEMPTS = 5;
+    private static final ReentrantLock[] RETRY_GATES = createRetryGates();
+    private static final Logger log = LoggerFactory.getLogger(ActionConcurrencyService.class);
     private final TransactionTemplate transactions;
     private final WorkbenchService workbench;
+    @Value("${readiness.action.optimistic-retry-gate.enabled:false}")
+    private boolean optimisticRetryGateEnabled;
     private final LongAdder optimisticConflicts = new LongAdder();
     private final LongAdder optimisticRetries = new LongAdder();
+    private final LongAdder optimisticExhaustions = new LongAdder();
     @PersistenceContext private EntityManager em;
 
     public ActionConcurrencyService(PlatformTransactionManager transactionManager, WorkbenchService workbench) {
@@ -45,33 +54,59 @@ public class ActionConcurrencyService {
 
     public long optimisticConflicts() { return optimisticConflicts.sum(); }
     public long optimisticRetries() { return optimisticRetries.sum(); }
+    public long optimisticExhaustions() { return optimisticExhaustions.sum(); }
+    public boolean isOptimisticRetryGateEnabled() { return optimisticRetryGateEnabled; }
 
     private UpdateResult update(long id, Patch patch, String actor, String role, LockModeType lockMode) {
         long started = System.nanoTime();
         int retries = 0;
-        for (int attempt = 1; ; attempt++) {
-            try {
-                ReadinessAction action = transactions.execute(status -> {
-                    ReadinessAction row = lockMode == LockModeType.NONE
-                        ? em.find(ReadinessAction.class, id)
-                        : em.find(ReadinessAction.class, id, lockMode);
-                    if (row == null) throw new java.util.NoSuchElementException("Readiness action not found");
-                    String before = summary(row);
-                    apply(row, patch);
-                    row.updateCount++;
-                    em.flush();
-                    workbench.audit(actor, role, "ReadinessAction", id, "UPDATE", before, summary(row));
-                    return row;
-                });
-                return new UpdateResult(action, retries, System.nanoTime() - started);
-            } catch (OptimisticLockingFailureException | jakarta.persistence.OptimisticLockException conflict) {
-                optimisticConflicts.increment();
-                if (attempt >= MAX_ATTEMPTS) throw conflict;
-                optimisticRetries.increment();
-                retries++;
-                LockSupport.parkNanos(ThreadLocalRandom.current().nextLong(1_000_000, 10_000_001));
+        ReentrantLock retryGate = optimisticRetryGateEnabled
+            ? RETRY_GATES[Math.floorMod(Long.hashCode(id), RETRY_GATES.length)] : null;
+        boolean retryGateHeld = false;
+        try {
+            for (int attempt = 1; ; attempt++) {
+                try {
+                    ReadinessAction action = transactions.execute(status -> {
+                        ReadinessAction row = lockMode == LockModeType.NONE
+                            ? em.find(ReadinessAction.class, id)
+                            : em.find(ReadinessAction.class, id, lockMode);
+                        if (row == null) throw new java.util.NoSuchElementException("Readiness action not found");
+                        String before = summary(row);
+                        apply(row, patch);
+                        row.updateCount++;
+                        em.flush();
+                        workbench.audit(actor, role, "ReadinessAction", id, "UPDATE", before, summary(row));
+                        return row;
+                    });
+                    return new UpdateResult(action, retries, System.nanoTime() - started);
+                } catch (OptimisticLockingFailureException | jakarta.persistence.OptimisticLockException conflict) {
+                    optimisticConflicts.increment();
+                    if (attempt >= MAX_ATTEMPTS) {
+                        optimisticExhaustions.increment();
+                        log.warn("Optimistic update exhausted {} attempts for readiness_action id={} (exhausted writers={})",
+                            attempt, id, optimisticExhaustions.sum());
+                        throw conflict;
+                    }
+                    optimisticRetries.increment();
+                    retries++;
+                    if (retryGate != null && !retryGateHeld) {
+                        retryGate.lock();
+                        retryGateHeld = true;
+                    }
+                    long exponentialCapMillis = 2L << (attempt - 1);
+                    long delayMillis = ThreadLocalRandom.current().nextLong(exponentialCapMillis / 2, exponentialCapMillis + 1);
+                    LockSupport.parkNanos(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(delayMillis));
+                }
             }
+        } finally {
+            if (retryGateHeld) retryGate.unlock();
         }
+    }
+
+    private static ReentrantLock[] createRetryGates() {
+        ReentrantLock[] gates = new ReentrantLock[64];
+        for (int i = 0; i < gates.length; i++) gates[i] = new ReentrantLock(true);
+        return gates;
     }
 
     private static void apply(ReadinessAction action, Patch patch) {

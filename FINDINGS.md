@@ -44,7 +44,7 @@ The requested literal Git clone could not be performed: this repository has no r
 - Role permissions: readiness lead decision (`onlyReadinessLeadCanRecordDecision`, `readinessLeadCanRecordHumanDecision`, `onlyReadinessLeadCanPostHtmlDecision`); control partner sign-off (`onlyControlPartnerCanSignOff`, `controlPartnerCanSignOff`); executive viewer read-only (`executiveViewerCanReadDashboard`, `executiveViewerCannotCreateAction`, `executiveViewerCannotApproveSummary`).
 - Region-specific dashboard values: `dashboardRegionFilterChangesSeededReadinessAndDefects`.
 - Event gates and retention: `demoEventProducerIsDisabledByDefault`, `demoEventProducerPublishesOnlyAfterReleaseIsLive`, `stabilisationQueueEvictsOldestAtConfiguredCap`, `syntheticPaymentStatusEventsDefaultToSyntheticLabel`.
-- Final `mvn verify`: **68 tests, 0 failures, 0 errors, 0 skipped**.
+- Before switching the benchmark to gate-disabled pure optimism, full `mvn verify` passed with **70 tests, 0 failures, 0 errors, 0 skipped**. The current gate-disabled benchmark correctly fails when it observes exhausted writers.
 
 ## Source lines by production package
 
@@ -134,18 +134,56 @@ Nonblank Java source lines, excluding comment-only lines:
 - `com.synthetic.readiness.WorkbenchIntegrationTest.dashboardPageRendersPhaseTwoSummaryControls`
 - `com.synthetic.readiness.WorkbenchIntegrationTest.auditApiHasNoDeleteRoute`
 
-Test invocation count from Surefire reports: 68.
+Test inventory contains 68 test methods; full `mvn verify` reports 70 invocations including parameterized cases.
 
-## Concurrency & performance (Nov 2026) — A0–A1 kickoff
+## Concurrency & performance (Nov 2026) — A0–A1
+
+Summary (50 concurrent writers on one `readiness_action` row; synthetic data, laptop benchmark):
+
+| Variant | Outcome | Lost updates | Failed callers |
+|---|---|---:|---:|
+| No locking (red baseline, 1 run) | final `update_count` 5/50 | 45 | 0 (silent loss) |
+| Optimistic `@Version`, 5 attempts, exponential jitter (pure, gate off) | exhausted 107–125 of 250 calls per invocation (43–50%), 4 invocations | 0 | 107–125 per 250 (rejected loudly; 409 via the API) |
+| Optimistic + opt-in single-JVM retry gate | 0 exhausted, 3 invocations | 0 | 0 |
+| Pessimistic `PESSIMISTIC_WRITE` (`SELECT … FOR UPDATE`) | 0 failures, 4 invocations | 0 | 0 |
+
+No speed ratio is claimed: pure optimistic batches completed less work than pessimistic ones.
 
 - Scenario is synthetic and uses seeded synthetic readiness actions; it is a local prototype workload, not bank-scale evidence.
 - A0 target: `readiness_action`, updated by `PATCH /api/actions/{id}` and the web action-completion form. The project has no Spring Data repository for this entity; `WorkbenchService` reads it through JPA `EntityManager`, and `ActionConcurrencyService` now owns concurrent writes. Integration tests already use Testcontainers PostgreSQL 17.6; there is no H2 substitution.
-- Red baseline: with `@Version` and the version column removed, 50 writers ran once through the plain read-modify-write path; final `update_count` was **5/50** (expected 50, observed 5). The assertion failed as intended. This was run against Testcontainers PostgreSQL 17.6 on JDK 25.0.4 using the cached JUnit launcher because Maven is not installed in this environment.
-- Prior versioned attempt (run result supplied by the developer): 50 writers, five attempts, flat 1–10 ms jitter; retries exhausted in run 1. The optimistic version check was working, and an exhausted writer propagated through `future.get()`.
-- Green design: add JPA `@Version` in V5, retain five bounded attempts with a back-off that grows per attempt plus jitter, log exhausted writers, and keep `PESSIMISTIC_WRITE` (`SELECT FOR UPDATE`) for comparison. `update_count` is the lost-update assertion.
-- The green benchmark will run 50 writers for five rounds per lock mode, assert all 500 increments, and print median wall time, optimistic retries/conflicts, and exhausted writers. Green timing results remain pending.
+- Red baseline: with `@Version` and the version column removed, 50 writers ran once through the plain read-modify-write path; final `update_count` was **5/50** (expected 50, observed 5). The assertion failed as intended. This was run against Testcontainers PostgreSQL 17.6 on JDK 25.0.4.
+- First versioned attempt: 50 writers, five attempts, flat 1–10 ms jitter; retries exhausted in run 1. The optimistic version check was working, and an exhausted writer propagated through `future.get()`.
+- Implementation: JPA `@Version` in V5; five total attempts; exponential jitter; warn log and HTTP 409 on exhaustion. The optional 64-stripe fair in-process retry gate is controlled by `READINESS_ACTION_OPTIMISTIC_RETRY_GATE_ENABLED` and defaults to `false`. When enabled, it mitigates retry stampedes only within one JVM; it does not coordinate application instances. The database version check remains the cross-instance concurrency control. The comparison path uses `PESSIMISTIC_WRITE` (`SELECT FOR UPDATE`); `update_count` is the lost-update assertion.
+- Historical gated variant: the earlier three warmed invocations used optimistic updates plus the in-process retry gate. These measurements are superseded for the pure optimistic comparison and are retained only as mitigation evidence:
+
+  | Invocation | Optimistic + gate median (ms) | Pessimistic median (ms) | Optimistic range (ms) | Pessimistic range (ms) | Retries | Exhausted |
+  |---|---:|---:|---:|---:|---:|---:|
+  | 1 | 314.256 | 159.430 | 268.641–601.937 | 122.319–195.339 | 224 | 0 |
+  | 2 (`verify`) | 339.021 | 182.600 | 253.204–406.196 | 134.131–206.739 | 218 | 0 |
+  | 3 | 515.631 | 220.258 | 426.486–575.326 | 192.763–315.121 | 225 | 0 |
+
+  Their medians were optimistic + gate **339.021 ms** (314.256–515.631) and pessimistic **182.600 ms** (159.430–220.258). These are local synthetic-workload observations, not the pure optimistic baseline.
+- Pure optimistic comparison: retry gate disabled; one 50-writer warm-up followed by five alternating measured pairs per invocation. All three invocations exhausted optimistic retries:
+
+  ```text
+  CONCURRENCY_BENCHMARK writers=50 runsPerMode=5 warmups=1 order=OP,PO,OP,PO,OP optimisticVariant=pure-optimistic-gate-disabled optimisticMedianMs=258.346 optimisticRangeMs=215.059-331.469 optimisticRetries=730 optimisticConflicts=851 optimisticExhaustedWriters=121 optimisticFailedWriters=121 warmupExhaustedWriters=27 warmupFailedWriters=27 pessimisticMedianMs=216.251 pessimisticRangeMs=155.228-421.665 pessimisticRetries=0 pessimisticConflicts=0 pessimisticExhaustedWriters=0 pessimisticFailedWriters=0 successfulUpdates=379
+  CONCURRENCY_BENCHMARK writers=50 runsPerMode=5 warmups=1 order=OP,PO,OP,PO,OP optimisticVariant=pure-optimistic-gate-disabled optimisticMedianMs=369.697 optimisticRangeMs=305.672-504.317 optimisticRetries=724 optimisticConflicts=846 optimisticExhaustedWriters=122 optimisticFailedWriters=122 warmupExhaustedWriters=26 warmupFailedWriters=26 pessimisticMedianMs=267.113 pessimisticRangeMs=235.919-347.354 pessimisticRetries=0 pessimisticConflicts=0 pessimisticExhaustedWriters=0 pessimisticFailedWriters=0 successfulUpdates=378
+  CONCURRENCY_BENCHMARK writers=50 runsPerMode=5 warmups=1 order=OP,PO,OP,PO,OP optimisticVariant=pure-optimistic-gate-disabled optimisticMedianMs=480.365 optimisticRangeMs=464.832-730.516 optimisticRetries=737 optimisticConflicts=862 optimisticExhaustedWriters=125 optimisticFailedWriters=125 warmupExhaustedWriters=25 warmupFailedWriters=25 pessimisticMedianMs=399.285 pessimisticRangeMs=354.494-481.017 pessimisticRetries=0 pessimisticConflicts=0 pessimisticExhaustedWriters=0 pessimisticFailedWriters=0 successfulUpdates=375
+  ```
+
+  Median of the three invocation medians: pure optimistic **369.697 ms** (258.346–480.365), pessimistic **267.113 ms** (216.251–399.285). The optimistic batches did not complete all 250 updates, so their elapsed times are not an equal-work speed comparison. The reliable finding is repeated exhaustion without the gate; do not state a speed ratio.
+- The three targeted gate-disabled benchmark invocations exhausted optimistic retries and failed the old zero-exhaustion assertion. After changing the test to assert correctness instead, full `mvn verify` passed with **70 tests, 0 failures, 0 errors, 0 skipped**. The full verify benchmark was a fourth, separate confirmation run:
+
+  ```text
+  CONCURRENCY_BENCHMARK writers=50 runsPerMode=5 warmups=1 order=OP,PO,OP,PO,OP optimisticVariant=pure-optimistic-gate-disabled optimisticMedianMs=288.003 optimisticRangeMs=271.013-316.971 optimisticRetries=676 optimisticConflicts=783 optimisticExhaustedWriters=107 optimisticFailedWriters=107 warmupExhaustedWriters=27 warmupFailedWriters=27 pessimisticMedianMs=250.303 pessimisticRangeMs=220.693-331.153 pessimisticRetries=0 pessimisticConflicts=0 pessimisticExhaustedWriters=0 pessimisticFailedWriters=0 successfulUpdates=393 databaseUpdateCount=393
+  ```
+
+  This confirms `update_count` equalled acknowledged successful writes, while exhausted optimistic callers were reported as failures and no pessimistic writer failed. The test does not assert a specific optimistic exhaustion count.
+- Measurement lesson: earlier comparisons always ran optimistic first and varied materially across invocations. Treat those comparisons as cold-start/order biased and exclude their ratios from professional-profile claims. The harness now uses one unmeasured 50-writer warm-up and alternates optimistic/pessimistic order across five measured pairs. The pure optimistic runs omit the optional single-JVM retry gate; do not conflate these results with the gated mitigation variant.
 - ADR: `docs/adr/ADR-001-readiness-action-locking.md`. Diagrams: `docs/diagrams/readiness-action-optimistic-lock.md` and `docs/diagrams/readiness-action-concurrency-benchmark.md`.
-- JDK build, laptop CPU/RAM, dataset size beyond the seeded row, and run outputs remain to be recorded with the A2–A4 measurements.
+- Back-off: five total attempts; after each of the first four conflicts the delay cap doubles (2, 4, 8, 16 ms) and the actual delay is drawn uniformly from half the cap to the full cap (1–2, 2–4, 4–8, 8–16 ms).
+- Environment: Intel Core i7-1165G7 (4 cores / 8 threads, 2.80 GHz), 16 GB RAM, Windows 11; JDK Eclipse Temurin 25.0.4.1 (25.0.4+101); Maven 3.9.11; PostgreSQL 17.6-alpine via Testcontainers on Docker Desktop 4.96.3 (WSL2, VM memory 8 GB); HikariCP pool 10 (default). Dataset: one synthetic `readiness_action` row per benchmark, created and deleted by the test.
+- Authorship: the concurrency test, red baseline, `@Version` and `PESSIMISTIC_WRITE` fixes, retry/back-off, opt-in retry gate, 409 mapping, benchmark harness, ADR-001 and the two diagrams were hand-coded/written by Kakali Bandyopadhyay. AI assistance (Claude): A0 target analysis, code review comments, and formatting of this FINDINGS section.
 
 ## Changed and added files
 
