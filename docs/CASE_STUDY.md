@@ -6,12 +6,6 @@ Kafka runs in single-node KRaft mode. After a readiness lead records Go or Condi
 
 The dashboard can generate a deterministic summary from dashboard facts. Optional model output uses the same facts, is labelled as a draft, and stays off the dashboard until a readiness lead approves it. Approval is audit logged. Model tests inject a fake client; credentials are read only from `OPENAI_API_KEY` in the environment.
 
-## Phase 2
-
-Kafka runs in single-node KRaft mode. After a readiness lead records Go or Conditional Go, the synthetic producer emits payment-status events about once a second. A consumer routes failed and rejected messages to a stabilisation topic and persists visible queue entries with severity, age, affected journey step, owner, and next action. Events arrive independently of the UI and can spike, so asynchronous delivery buffers them without blocking browser requests. No real payment is initiated.
-
-The dashboard can generate a deterministic summary from dashboard facts. Optional model output uses the same facts, is labelled as a draft, and stays off the dashboard until a readiness lead approves it. Approval is audit logged. Model tests inject a fake client; credentials are read only from `OPENAI_API_KEY` in the environment.
-
 ## Context
 
 This personal prototype uses an invented transaction bank and a designed launch scenario: real-time payment status notifications for corporate virtual accounts. All people, teams, records, dates, values, evidence references and examples are synthetic.

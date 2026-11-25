@@ -2,12 +2,12 @@
 
 ```mermaid
 flowchart LR
-    Driver[LoadDriver.java<br/>50 or 200 closed-loop workers<br/>one HttpClient and session per worker] -->|80% GET dashboard<br/>20% PATCH action| App[Spring Boot app<br/>Tomcat request threads:<br/>platform (max 200) or virtual]
+    Driver["LoadDriver.java<br/>50 or 200 closed-loop workers<br/>one HttpClient and session per worker"] -->|80% GET dashboard<br/>20% PATCH action| App["Spring Boot app<br/>Tomcat request threads:<br/>platform (max 200) or virtual"]
     Driver -->|Basic auth once per worker<br/>then JSESSIONID cookie| App
-    App -->|JPA requests| DB[(PostgreSQL 17.6<br/>Docker Compose<br/>HikariCP pool: 10)]
-    Monitor[LoadDriver pending-pool watcher] -->|Actuator pending metric<br/>sampled each second| App
-    Warmup[30 s unrecorded warm-up<br/>after server restart] --> Measure[60 s measured run]
-    Measure --> CSV[runs/a2s/results.csv<br/>throughput, p50/p95/p99,<br/>errors, 409s, max pending]
+    App -->|JPA requests| DB[("PostgreSQL 17.6<br/>Docker Compose<br/>HikariCP pool: 10")]
+    Monitor["LoadDriver pending-pool watcher"] -->|Actuator pending metric<br/>sampled each second| App
+    Warmup["30 s unrecorded warm-up<br/>after server restart"] --> Measure["60 s measured run"]
+    Measure --> CSV["runs/a2s/results.csv<br/>throughput, p50/p95/p99,<br/>errors, 409s, max pending"]
     Driver --> Warmup
     Driver --> Measure
 ```

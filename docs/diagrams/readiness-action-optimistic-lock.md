@@ -15,7 +15,7 @@ sequenceDiagram
         Update-->>Client: updated action
     else version changed
         DB-->>Update: zero rows / optimistic conflict
-        Update->>Update: rollback; acquire fair row stripe; exponential jitter; retry (max 5 attempts)
+        Update->>Update: Roll back and prepare a bounded retry
         Update->>Gate: serialize retries for this row stripe
         Update->>DB: Reload current row and retry patch
     end
